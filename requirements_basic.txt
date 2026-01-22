@@ -1,0 +1,6 @@
+# Basic dependencies for testing
+requests==2.31.0
+pandas==2.1.4
+python-dotenv==1.0.1
+gtfs-realtime-bindings==1.0.0
+protobuf==4.25.2
