@@ -1,15 +1,3 @@
-"""
-BART Data Ingestion Script
-Fetches real-time BART transit data and saves to parquet files
-
-Usage:
-    python data_engineering/scripts/ingest_bart_data.py
-
-Output:
-    - bart_trip_updates_YYYYMMDD_HHMMSS.parquet
-    - bart_service_alerts_YYYYMMDD_HHMMSS.parquet
-"""
-
 import os
 import sys
 import logging
@@ -18,6 +6,8 @@ import pandas as pd
 from datetime import datetime
 from google.transit import gtfs_realtime_pb2
 from pathlib import Path
+import io
+import zipfile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 TRIP_URL = "http://api.bart.gov/gtfsrt/tripupdate.aspx"
 ALERTS_URL = "http://api.bart.gov/gtfsrt/alerts.aspx"
+STATIC_GTFS_URL = "https://www.bart.gov/dev/schedules/google_transit.zip"
 
 
 class BARTDataIngestion:
@@ -35,7 +26,75 @@ class BARTDataIngestion:
     def __init__(self, output_dir='./data/raw'):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.trip_to_route_cache = {}
         logger.info(f"Output directory: {self.output_dir}")
+    
+    def download_static_gtfs(self):
+        try:
+            logger.info("Downloading BART static GTFS schedule...")
+            response = requests.get(STATIC_GTFS_URL, timeout=30)
+            response.raise_for_status()
+            
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                if 'trips.txt' in z.namelist():
+                    with z.open('trips.txt') as f:
+                        trips_df = pd.read_csv(f)
+                        
+                    self.trip_to_route_cache = dict(zip(
+                        trips_df['trip_id'].astype(str), 
+                        trips_df['route_id'].astype(str)
+                    ))
+                    
+                    logger.info(f"Loaded {len(self.trip_to_route_cache)} trip-to-route mappings")
+                    logger.info(f"Found {trips_df['route_id'].nunique()} unique routes in static GTFS")
+                    return True
+                else:
+                    logger.warning("trips.txt not found in GTFS zip")
+                    return False
+                    
+        except Exception as e:
+            logger.warning(f"Failed to download static GTFS: {e}")
+            logger.info("Will attempt to parse route from trip_id as fallback")
+            return False
+    
+    def extract_route_from_trip_id(self, trip_id):
+        if not trip_id:
+            return None
+            
+        if trip_id in self.trip_to_route_cache:
+            return self.trip_to_route_cache[trip_id]
+        
+        if len(trip_id) >= 2 and trip_id[:2].isdigit():
+            return trip_id[:2]
+        
+        if '_' in trip_id:
+            first_part = trip_id.split('_')[0]
+            if first_part.isdigit():
+                return first_part
+                
+        if '-' in trip_id:
+            first_part = trip_id.split('-')[0]
+            if first_part.isdigit():
+                return first_part
+        
+        return None
+    
+    def get_route_id(self, trip_descriptor):
+        if trip_descriptor.HasField('route_id') and trip_descriptor.route_id:
+            return str(trip_descriptor.route_id)
+        
+        trip_id = trip_descriptor.trip_id if trip_descriptor.HasField('trip_id') else None
+        
+        if trip_id:
+            trip_id_str = str(trip_id)
+            if trip_id_str in self.trip_to_route_cache:
+                return str(self.trip_to_route_cache[trip_id_str])
+            
+            parsed_route = self.extract_route_from_trip_id(trip_id_str)
+            if parsed_route:
+                return str(parsed_route)
+        
+        return None
     
     def fetch_and_parse_trip_updates(self, url):
         logger.info("Fetching BART trip updates")
@@ -54,7 +113,7 @@ class BARTDataIngestion:
                 trip = entity.trip_update
                 
                 trip_id = trip.trip.trip_id if trip.HasField('trip') else None
-                route_id = trip.trip.route_id if trip.HasField('trip') else None
+                route_id = self.get_route_id(trip.trip) if trip.HasField('trip') else None
                 
                 for stop_update in trip.stop_time_update:
                     update_record = {
@@ -153,31 +212,52 @@ class BARTDataIngestion:
         return filepath
     
     def analyze_data(self, trips_df, alerts_df):
-        logger.info(f"Trip Updates: {len(trips_df)} total, {trips_df['trip_id'].nunique()} unique trips, {trips_df['route_id'].nunique()} routes active")
-        logger.info(f"Service Alerts: {len(alerts_df)} total")
+        total_trips = trips_df['trip_id'].nunique()
+        total_routes = trips_df['route_id'].nunique()
+        routes_with_data = trips_df[trips_df['route_id'].notna()]['route_id'].nunique()
+        
+        logger.info(f"Trip Updates: {len(trips_df)} total, {total_trips} unique trips, {total_routes} routes active")
+        logger.info(f"Routes with data: {routes_with_data} / {total_routes}")
+        
+        if trips_df['route_id'].notna().any():
+            route_counts = trips_df[trips_df['route_id'].notna()].groupby('route_id').size().sort_values(ascending=False)
+            logger.info(f"\nActive Routes:")
+            for route_id, count in route_counts.head(10).items():
+                logger.info(f"Route {route_id}: {count} updates")
+        else:
+            logger.warning("No route_id data found - static GTFS mapping may be needed")
+        
+        logger.info(f"\nService Alerts: {len(alerts_df)} total")
         
         if len(trips_df) > 0 and trips_df['arrival_delay'].notna().any():
-            # only looking at delays over 1 minute
-            delayed = trips_df[trips_df['arrival_delay'].notna() & (trips_df['arrival_delay'] > 60)]
+            trips_df['delay_seconds'] = trips_df['arrival_delay'].fillna(trips_df['departure_delay'])
+            
+            delayed = trips_df[trips_df['delay_seconds'].notna() & (trips_df['delay_seconds'] > 60)]
             
             if len(delayed) > 0:
-                avg_delay_min = delayed['arrival_delay'].mean() / 60
-                logger.info(f"Delays: {len(delayed)} stops with delays > 1 min, average {avg_delay_min:.1f} minutes")
+                avg_delay_min = delayed['delay_seconds'].mean() / 60
+                logger.info(f"\nDelays: {len(delayed)} stops with delays > 1 min, average {avg_delay_min:.1f} minutes")
                 
-                route_delays = delayed.groupby('route_id')['arrival_delay'].agg(['count', 'mean'])
-                route_delays = route_delays.sort_values('mean', ascending=False)
-                
-                if len(route_delays) > 0:
-                    top_delayed = route_delays.head(3)
-                    for route, row in top_delayed.iterrows():
-                        logger.info(f"Route {route}: {int(row['count'])} delays, avg {row['mean']/60:.1f} min")
+                if delayed['route_id'].notna().any():
+                    route_delays = delayed[delayed['route_id'].notna()].groupby('route_id')['delay_seconds'].agg(['count', 'mean'])
+                    route_delays = route_delays.sort_values('mean', ascending=False)
+                    
+                    if len(route_delays) > 0:
+                        logger.info(f"\nRoutes by Average Delay:")
+                        top_delayed = route_delays.head(5)
+                        for route_id, row in top_delayed.iterrows():
+                            logger.info(f"  Route {route_id}: {int(row['count'])} delays, avg {row['mean']/60:.1f} min")
+                else:
+                    logger.warning("Cannot compute per-route delays - route_id missing")
             else:
-                logger.info("No significant delays detected (all within 1 minute)")
+                logger.info("\nNo significant delays detected (all within 1 minute)")
     
     def run(self):
         logger.info(f"Starting BART data ingestion at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
         try:
+            self.download_static_gtfs()
+            
             trips_df = self.fetch_and_parse_trip_updates(TRIP_URL)
             alerts_df = self.fetch_and_parse_service_alerts(ALERTS_URL)
             
@@ -186,7 +266,7 @@ class BARTDataIngestion:
             
             self.analyze_data(trips_df, alerts_df)
             
-            logger.info("Ingestion completed successfully")
+            logger.info("\nIngestion completed successfully")
             
             return 0
             
