@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: bart_postgres
+    environment:
+      POSTGRES_USER: bart
+      POSTGRES_PASSWORD: bart
+      POSTGRES_DB: bart_dw
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  ingestion:
+    build: .
+    container_name: bart_ingestion
+    depends_on:
+      - postgres
+    environment:
+      RAW_DIR: /app/data/raw
+    volumes:
+      - ./data:/app/data
+    command: python data_engineering/ingestion/ingest_bart.py
+
+volumes:
+  postgres_data:

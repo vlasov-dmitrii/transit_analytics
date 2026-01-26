@@ -23,29 +23,29 @@ def explore_trip_data(filepath):
     df = pd.read_parquet(filepath)
     
     print(f"\nTrip Updates Dataset:")
-    print(f"  Total updates: {len(df):,}")
-    print(f"  Unique trips: {df['trip_id'].nunique():,}")
-    print(f"  Unique routes: {df['route_id'].nunique()}")
-    print(f"  Data timestamp: {df['timestamp'].iloc[0]}")
+    print(f"Total updates: {len(df):,}")
+    print(f"Unique trips: {df['trip_id'].nunique():,}")
+    print(f"Unique routes: {df['route_id'].nunique()}")
+    print(f"Data timestamp: {df['timestamp'].iloc[0]}")
     
     print(f"\nActive Routes:")
     route_counts = df.groupby('route_id')['trip_id'].nunique().sort_values(ascending=False)
     for route, count in route_counts.items():
-        print(f"  Route {route}: {count} active trips")
+        print(f"Route {route}: {count} active trips")
     
     delays = df[df['arrival_delay'].notna()]
     
     if len(delays) > 0:
         print(f"\nDelay Analysis:")
-        print(f"  Updates with delay information: {len(delays):,}")
+        print(f"Updates with delay information: {len(delays):,}")
         
         avg_delay = delays['arrival_delay'].mean() / 60
         max_delay = delays['arrival_delay'].max() / 60
         min_delay = delays['arrival_delay'].min() / 60
         
-        print(f"  Average delay: {avg_delay:.1f} minutes")
-        print(f"  Maximum delay: {max_delay:.1f} minutes")
-        print(f"  Minimum delay: {min_delay:.1f} minutes")
+        print(f"Average delay: {avg_delay:.1f} minutes")
+        print(f"Maximum delay: {max_delay:.1f} minutes")
+        print(f"Minimum delay: {min_delay:.1f} minutes")
         
         on_time = len(delays[delays['arrival_delay'].abs() <= 60])
         minor_delay = len(delays[(delays['arrival_delay'] > 60) & (delays['arrival_delay'] <= 300)])
@@ -54,10 +54,10 @@ def explore_trip_data(filepath):
         
         total = len(delays)
         print(f"\nPerformance Distribution:")
-        print(f"  On-time (±1 min): {on_time:,} ({on_time/total*100:.1f}%)")
-        print(f"  Minor delay (1-5 min): {minor_delay:,} ({minor_delay/total*100:.1f}%)")
-        print(f"  Major delay (>5 min): {major_delay:,} ({major_delay/total*100:.1f}%)")
-        print(f"  Running early: {early:,} ({early/total*100:.1f}%)")
+        print(f"On-time (±1 min): {on_time:,} ({on_time/total*100:.1f}%)")
+        print(f"Minor delay (1-5 min): {minor_delay:,} ({minor_delay/total*100:.1f}%)")
+        print(f"Major delay (>5 min): {major_delay:,} ({major_delay/total*100:.1f}%)")
+        print(f"Running early: {early:,} ({early/total*100:.1f}%)")
         
         route_performance = delays.groupby('route_id').agg({
             'arrival_delay': ['mean', 'count']
@@ -105,20 +105,20 @@ def explore_alert_data(filepath):
 
 def create_summary_report(trips_df, alerts_df):
     print(f"\nSystem Summary:")
-    print(f"  Active trips: {trips_df['trip_id'].nunique():,}")
-    print(f"  Routes in service: {trips_df['route_id'].nunique()}")
-    print(f"  Stops tracked: {len(trips_df):,}")
-    print(f"  Service alerts: {len(alerts_df)}")
+    print(f"Active trips: {trips_df['trip_id'].nunique():,}")
+    print(f"Routes in service: {trips_df['route_id'].nunique()}")
+    print(f"Stops tracked: {len(trips_df):,}")
+    print(f"Service alerts: {len(alerts_df)}")
     
     delays = trips_df[trips_df['arrival_delay'].notna()]
     if len(delays) > 0:
         on_time = len(delays[delays['arrival_delay'].abs() <= 60])
         on_time_pct = (on_time / len(delays)) * 100
-        print(f"  On-time performance: {on_time_pct:.1f}%")
+        print(f"On-time performance: {on_time_pct:.1f}%")
     
     print(f"\nData Quality:")
-    print(f"  Trip updates with delay data: {trips_df['arrival_delay'].notna().sum():,}")
-    print(f"  Trip updates with timestamp data: {trips_df['arrival_time'].notna().sum():,}")
+    print(f"Trip updates with delay data: {trips_df['arrival_delay'].notna().sum():,}")
+    print(f"Trip updates with timestamp data: {trips_df['arrival_time'].notna().sum():,}")
 
 def main():
     print(f"\nBART Data Exploration - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
