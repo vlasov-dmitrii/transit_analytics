@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   postgres:
     image: postgres:15
@@ -20,7 +22,10 @@ services:
       RAW_DIR: /app/data/raw
     volumes:
       - ./data:/app/data
-    command: python data_engineering/ingestion/ingest_bart.py
+      - ./data_engineering:/app/data_engineering
+    command: >
+      bash -c "python data_engineering/ingestion/ingest_bart.py &&
+               python data_engineering/loading/load_bart.py"
 
 volumes:
   postgres_data:

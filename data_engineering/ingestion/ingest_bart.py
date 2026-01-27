@@ -117,11 +117,17 @@ class BARTDataIngestion:
                 
                 for stop_update in trip.stop_time_update:
                     update_record = {
-                        'timestamp': feed_timestamp,
                         'trip_id': trip_id,
                         'route_id': route_id,
                         'stop_id': stop_update.stop_id if stop_update.HasField('stop_id') else None,
                         'stop_sequence': stop_update.stop_sequence if stop_update.HasField('stop_sequence') else None,
+                        'scheduled_time': datetime.fromtimestamp(stop_update.arrival.time) if stop_update.HasField('arrival') and stop_update.arrival.HasField('time') else None,
+                        'actual_time': datetime.fromtimestamp(stop_update.departure.time) if stop_update.HasField('departure') and stop_update.departure.HasField('time') else None,
+                        'delay_minutes': (
+                            (stop_update.arrival.delay if stop_update.HasField('arrival') and stop_update.arrival.HasField('delay') else
+                            stop_update.departure.delay if stop_update.HasField('departure') and stop_update.departure.HasField('delay') else None) / 60
+                        ),
+                        'vehicle_id': stop_update.vehicle.id if stop_update.HasField('vehicle') and stop_update.vehicle.HasField('id') else None,
                     }
                     
                     if stop_update.HasField('arrival'):
