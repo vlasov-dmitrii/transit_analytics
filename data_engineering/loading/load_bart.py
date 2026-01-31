@@ -31,7 +31,6 @@ def create_tables(conn):
             trip_id TEXT,
             route_id TEXT,
             stop_id TEXT,
-            stop_sequence INT,
             arrival_time TIMESTAMPTZ,
             departure_time TIMESTAMPTZ,
             arrival_delay FLOAT,
