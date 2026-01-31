@@ -14,16 +14,14 @@ DB_CONFIG = {
     "password": "bart"
 }
 
-
-def get_ingestion_ts_from_filename(filename: str) -> datetime:
-    ts = os.path.splitext(filename)[0].split("_")[-1]
-    ts_str = datetime.today().strftime("%Y%m%d") + ts
-    return datetime.strptime(ts_str, "%Y%m%d%H%M%S")
-
-
 def connect_db():
-    return psycopg2.connect(**DB_CONFIG)
-
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        print("Successfully connected to database")
+        return conn
+    except Exception as e:
+        print(f"Failed to connect to database: {e}")
+        raise
 
 def create_tables(conn):
     with conn.cursor() as cur:
@@ -34,95 +32,175 @@ def create_tables(conn):
             route_id TEXT,
             stop_id TEXT,
             stop_sequence INT,
-            scheduled_time TIMESTAMPTZ,
-            actual_time TIMESTAMPTZ,
-            delay_minutes FLOAT,
-            vehicle_id TEXT
+            arrival_time TIMESTAMPTZ,
+            departure_time TIMESTAMPTZ,
+            arrival_delay FLOAT,
+            departure_delay FLOAT
         );
         """)
-
+        
         cur.execute("""
         CREATE TABLE IF NOT EXISTS bart_service_alerts (
             ingestion_ts TIMESTAMPTZ,
             alert_id TEXT,
-            route_id TEXT,
-            description TEXT,
-            severity TEXT
+            affected_routes TEXT,
+            description_text TEXT,
+            cause TEXT
         );
         """)
+        
         conn.commit()
-
+        print("Tables created successfully")
 
 def load_trip_updates(conn):
     files = glob.glob(f"{RAW_DIR}/bart_trip_updates_*.parquet")
-
+    
+    if not files:
+        print("No trip update files found")
+        return
+    
+    print(f"Found {len(files)} trip update file(s)")
+    
+    total_loaded = 0
     for file in files:
-        ingestion_ts = get_ingestion_ts_from_filename(os.path.basename(file))
-        df = pd.read_parquet(file)
-        df["ingestion_ts"] = ingestion_ts
-
-        records = df[
-            [
-                "ingestion_ts",
-                "trip_id",
-                "route_id",
-                "stop_id",
-                "stop_sequence",
-                "scheduled_time",
-                "actual_time",
-                "delay_minutes",
-                "vehicle_id",
-            ]
-        ].values.tolist()
-
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO bart_trip_updates VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """,
-                records,
-            )
-        conn.commit()
-        print(f"Loaded {len(records)} trip updates from {file}")
-
+        try:
+            print(f"Processing: {os.path.basename(file)}")
+            df = pd.read_parquet(file)
+            
+            if 'timestamp' in df.columns:
+                df['ingestion_ts'] = df['timestamp']
+            else:
+                df['ingestion_ts'] = datetime.now()
+            
+            records = df[
+                [
+                    "ingestion_ts",
+                    "trip_id",
+                    "route_id",
+                    "stop_id",
+                    "stop_sequence",
+                    "arrival_time",
+                    "departure_time",
+                    "arrival_delay",
+                    "departure_delay"
+                ]
+            ].values.tolist()
+            
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO bart_trip_updates 
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    records,
+                )
+            conn.commit()
+            
+            total_loaded += len(records)
+            print(f"Loaded {len(records)} trip updates")
+            
+        except Exception as e:
+            print(f"Error loading {file}: {e}")
+            conn.rollback()
+            continue
+    
+    print(f"Total trip updates loaded: {total_loaded}")
 
 def load_service_alerts(conn):
     files = glob.glob(f"{RAW_DIR}/bart_service_alerts_*.parquet")
-
+    
+    if not files:
+        print("No service alert files found")
+        return
+    
+    print(f"Found {len(files)} service alert file(s)")
+    
+    total_loaded = 0
     for file in files:
-        ingestion_ts = get_ingestion_ts_from_filename(os.path.basename(file))
-        df = pd.read_parquet(file)
-        df["ingestion_ts"] = ingestion_ts
+        try:
+            print(f"Processing: {os.path.basename(file)}")
+            df = pd.read_parquet(file)
+            
+            if 'timestamp' in df.columns:
+                df['ingestion_ts'] = df['timestamp']
+            else:
+                df['ingestion_ts'] = datetime.now()
+            
+            records = df[
+                [
+                    "ingestion_ts",
+                    "alert_id",
+                    "affected_routes",
+                    "description_text",
+                    "cause"
+                ]
+            ].values.tolist()
+            
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO bart_service_alerts 
+                    VALUES (%s,%s,%s,%s,%s)
+                    """,
+                    records,
+                )
+            conn.commit()
+            
+            total_loaded += len(records)
+            print(f"Loaded {len(records)} service alerts")
+            
+        except Exception as e:
+            print(f"Error loading {file}: {e}")
+            conn.rollback()
+            continue
+    
+    print(f"Total service alerts loaded: {total_loaded}")
 
-        records = df[
-            [
-                "ingestion_ts",
-                "alert_id",
-                "route_id",
-                "description",
-                "severity",
-            ]
-        ].values.tolist()
-
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO bart_service_alerts VALUES (%s,%s,%s,%s,%s)
-                """,
-                records,
-            )
-        conn.commit()
-        print(f"Loaded {len(records)} service alerts from {file}")
-
+def verify_data(conn):
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM bart_trip_updates")
+        trip_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM bart_service_alerts")
+        alert_count = cur.fetchone()[0]
+        
+        print(f"Database Summary:")
+        print(f"Trip updates: {trip_count:,} records")
+        print(f"Service alerts: {alert_count:,} records")
+        
+        if trip_count > 0:
+            cur.execute("""
+                SELECT route_id, COUNT(*) as count 
+                FROM bart_trip_updates 
+                WHERE route_id IS NOT NULL
+                GROUP BY route_id 
+                ORDER BY count DESC 
+                LIMIT 5
+            """)
+            print(f"Top routes by updates:")
+            for route, count in cur.fetchall():
+                print(f"Route {route}: {count:,} updates")
 
 def main():
-    conn = connect_db()
-    create_tables(conn)
-    load_trip_updates(conn)
-    load_service_alerts(conn)
-    conn.close()
-    print("Loading completed successfully")
-
+    print("BART Data Loader")
+    
+    try:
+        conn = connect_db()
+        
+        create_tables(conn)
+        
+        load_trip_updates(conn)
+        load_service_alerts(conn)
+        
+        verify_data(conn)
+        
+        conn.close()
+        
+        print("Loading completed successfully!")
+        
+    except Exception as e:
+        print(f"Fatal error: {e}")
+        raise
 
 if __name__ == "__main__":
     main()
