@@ -77,7 +77,6 @@ def load_trip_updates(conn):
                     "trip_id",
                     "route_id",
                     "stop_id",
-                    "stop_sequence",
                     "arrival_time",
                     "departure_time",
                     "arrival_delay",
@@ -89,7 +88,7 @@ def load_trip_updates(conn):
                 cur.executemany(
                     """
                     INSERT INTO bart_trip_updates 
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                     """,
                     records,
                 )

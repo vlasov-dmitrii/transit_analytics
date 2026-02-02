@@ -116,35 +116,19 @@ class BARTDataIngestion:
                 route_id = self.get_route_id(trip.trip) if trip.HasField('trip') else None
                 
                 for stop_update in trip.stop_time_update:
-                    for stop_update in trip.stop_time_update:
-                        update_record = {
-                            'timestamp': feed_timestamp,
-                            'trip_id': trip_id,
-                            'route_id': route_id,
-                            'stop_id': stop_update.stop_id if stop_update.HasField('stop_id') else None,
-                            'stop_sequence': stop_update.stop_sequence if stop_update.HasField('stop_sequence') else None,
-                            'arrival_delay': stop_update.arrival.delay if stop_update.HasField('arrival') and stop_update.arrival.HasField('delay') else None,
-                            'arrival_time': datetime.fromtimestamp(stop_update.arrival.time) if stop_update.HasField('arrival') and stop_update.arrival.HasField('time') else None,
-                            'departure_delay': stop_update.departure.delay if stop_update.HasField('departure') and stop_update.departure.HasField('delay') else None,
-                            'departure_time': datetime.fromtimestamp(stop_update.departure.time) if stop_update.HasField('departure') and stop_update.departure.HasField('time') else None,
-                        }
+                    update_record = {
+                        'timestamp': feed_timestamp,
+                        'trip_id': trip_id,
+                        'route_id': route_id,
+                        'stop_id': stop_update.stop_id if stop_update.HasField('stop_id') else None,
+                        'arrival_delay': stop_update.arrival.delay if stop_update.HasField('arrival') and stop_update.arrival.HasField('delay') else None,
+                        'arrival_time': datetime.fromtimestamp(stop_update.arrival.time) if stop_update.HasField('arrival') and stop_update.arrival.HasField('time') else None,
+                        'departure_delay': stop_update.departure.delay if stop_update.HasField('departure') and stop_update.departure.HasField('delay') else None,
+                        'departure_time': datetime.fromtimestamp(stop_update.departure.time) if stop_update.HasField('departure') and stop_update.departure.HasField('time') else None,
+                    }
 
-                    
-                    if stop_update.HasField('arrival'):
-                        update_record['arrival_delay'] = stop_update.arrival.delay if stop_update.arrival.HasField('delay') else None
-                        update_record['arrival_time'] = datetime.fromtimestamp(stop_update.arrival.time) if stop_update.arrival.HasField('time') else None
-                    else:
-                        update_record['arrival_delay'] = None
-                        update_record['arrival_time'] = None
-                    
-                    if stop_update.HasField('departure'):
-                        update_record['departure_delay'] = stop_update.departure.delay if stop_update.departure.HasField('delay') else None
-                        update_record['departure_time'] = datetime.fromtimestamp(stop_update.departure.time) if stop_update.departure.HasField('time') else None
-                    else:
-                        update_record['departure_delay'] = None
-                        update_record['departure_time'] = None
-                    
                     updates.append(update_record)
+
         
         df = pd.DataFrame(updates)
         logger.info(f"Parsed {len(df)} trip updates from {len(feed.entity)} trips")
