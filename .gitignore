@@ -16,9 +16,9 @@ build/
 .env.local
 
 # Data files
-data/raw/*
+#data/raw/*
 data/processed/*
-*.parquet
+#*.parquet
 *.csv
 
 # Logs
