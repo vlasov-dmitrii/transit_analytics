@@ -10,12 +10,18 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bart -d bart_dw"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   ingestion:
     build: .
     container_name: bart_ingestion
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     environment:
       RAW_DIR: /app/data/raw
     volumes:
@@ -24,6 +30,23 @@ services:
     command: >
       bash -c "python data_engineering/ingestion/ingest_bart.py &&
                python data_engineering/loading/load_bart.py"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: bart_dashboard
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./dashboard:/app/dashboard
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+    command: streamlit run dashboard/dashboard.py
 
 volumes:
   postgres_data:
