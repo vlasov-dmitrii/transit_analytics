@@ -4,201 +4,206 @@ import pandas as pd
 import psycopg2
 from datetime import datetime
 
-RAW_DIR = "/app/data/raw"
+RAW_DIR = os.getenv('RAW_DIR', '/app/data/raw')
 
 DB_CONFIG = {
-    "host": "bart_postgres",
-    "port": 5432,
-    "dbname": "bart_dw",
-    "user": "bart",
-    "password": "bart"
+    "host": os.getenv('DB_HOST', 'bart_postgres'),
+    "port": int(os.getenv('DB_PORT', 5432)),
+    "dbname": os.getenv('DB_NAME', 'bart_dw'),
+    "user": os.getenv('DB_USER', 'bart'),
+    "password": os.getenv('DB_PASSWORD', 'bart')
 }
 
 def connect_db():
     try:
         conn = psycopg2.connect(**DB_CONFIG)
-        print("Successfully connected to database")
+        print("✓ Connected to PostgreSQL")
         return conn
     except Exception as e:
-        print(f"Failed to connect to database: {e}")
+        print(f"✗ Database connection failed: {e}")
         raise
 
 def create_tables(conn):
     with conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS bart_trip_updates CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS bart_service_alerts CASCADE;")
+
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS bart_trip_updates (
-            ingestion_ts TIMESTAMPTZ,
+        CREATE TABLE bart_trip_updates (
+            ingestion_ts TIMESTAMPTZ NOT NULL,
             trip_id TEXT,
             route_id TEXT,
             stop_id TEXT,
+            stop_sequence INTEGER DEFAULT 0,
+            arrival_delay INTEGER,
             arrival_time TIMESTAMPTZ,
+            departure_delay INTEGER,
             departure_time TIMESTAMPTZ,
-            arrival_delay FLOAT,
-            departure_delay FLOAT
+            schedule_relationship INTEGER DEFAULT 0
         );
         """)
-        
+
         cur.execute("""
-        CREATE TABLE IF NOT EXISTS bart_service_alerts (
-            ingestion_ts TIMESTAMPTZ,
+        CREATE INDEX idx_trip_updates_ingestion_ts ON bart_trip_updates(ingestion_ts);
+        CREATE INDEX idx_trip_updates_route_id ON bart_trip_updates(route_id);
+        CREATE INDEX idx_trip_updates_stop_id ON bart_trip_updates(stop_id);
+        """)
+
+        cur.execute("""
+        CREATE TABLE bart_service_alerts (
+            ingestion_ts TIMESTAMPTZ NOT NULL,
             alert_id TEXT,
-            affected_routes TEXT,
+            cause INTEGER,
+            effect INTEGER,
+            header_text TEXT,
             description_text TEXT,
-            cause TEXT
+            affected_routes TEXT,
+            affected_stops TEXT,
+            active_period_start TIMESTAMPTZ,
+            active_period_end TIMESTAMPTZ
         );
         """)
-        
+
+        cur.execute("""
+        CREATE INDEX idx_service_alerts_ingestion_ts ON bart_service_alerts(ingestion_ts);
+        """)
+
         conn.commit()
-        print("Tables created successfully")
+        print("✓ Tables created with indexes")
 
 def load_trip_updates(conn):
     files = glob.glob(f"{RAW_DIR}/bart_trip_updates_*.parquet")
-    
     if not files:
-        print("No trip update files found")
+        print("⚠️  No trip update files found")
         return
-    
-    print(f"Found {len(files)} trip update file(s)")
-    
+
+    print(f"✓ Found {len(files)} trip update file(s)")
     total_loaded = 0
+
     for file in files:
         try:
-            print(f"Processing: {os.path.basename(file)}")
+            print(f"📂 Loading {os.path.basename(file)}")
             df = pd.read_parquet(file)
+            print(f"   Records: {len(df):,}")
             
-            if 'timestamp' in df.columns:
+            # Handle column name variations
+            if 'timestamp' in df.columns and 'ingestion_ts' not in df.columns:
                 df['ingestion_ts'] = df['timestamp']
-            else:
+            elif 'ingestion_ts' not in df.columns:
                 df['ingestion_ts'] = datetime.now()
             
-            records = df[
-                [
-                    "ingestion_ts",
-                    "trip_id",
-                    "route_id",
-                    "stop_id",
-                    "arrival_time",
-                    "departure_time",
-                    "arrival_delay",
-                    "departure_delay"
-                ]
-            ].values.tolist()
-            
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    INSERT INTO bart_trip_updates 
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                    """,
-                    records,
-                )
-            conn.commit()
-            
+            # Add missing columns
+            if 'stop_sequence' not in df.columns:
+                df['stop_sequence'] = 0
+            if 'schedule_relationship' not in df.columns:
+                df['schedule_relationship'] = 0
+
+            required_columns = [
+                "ingestion_ts", "trip_id", "route_id", "stop_id",
+                "stop_sequence", "arrival_delay", "arrival_time",
+                "departure_delay", "departure_time", "schedule_relationship"
+            ]
+
+            for col in required_columns:
+                if col not in df.columns:
+                    df[col] = None if col not in ['stop_sequence', 'schedule_relationship'] else 0
+
+            records = df[required_columns].values.tolist()
+
+            # Batch insert for performance
+            batch_size = 5000
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i+batch_size]
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO bart_trip_updates
+                        (ingestion_ts, trip_id, route_id, stop_id, stop_sequence,
+                         arrival_delay, arrival_time, departure_delay, departure_time,
+                         schedule_relationship)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        batch
+                    )
+                conn.commit()
+
             total_loaded += len(records)
-            print(f"Loaded {len(records)} trip updates")
-            
+            print(f"   ✓ Inserted: {len(records):,} records")
+
         except Exception as e:
-            print(f"Error loading {file}: {e}")
+            print(f"   ✗ Error: {e}")
             conn.rollback()
-            continue
-    
-    print(f"Total trip updates loaded: {total_loaded}")
+
+    print(f"✓ Total trip updates loaded: {total_loaded:,}")
 
 def load_service_alerts(conn):
     files = glob.glob(f"{RAW_DIR}/bart_service_alerts_*.parquet")
-    
     if not files:
-        print("No service alert files found")
         return
-    
-    print(f"Found {len(files)} service alert file(s)")
-    
+
+    print(f"✓ Found {len(files)} service alert file(s)")
     total_loaded = 0
+
     for file in files:
         try:
-            print(f"Processing: {os.path.basename(file)}")
+            print(f"📂 Loading {os.path.basename(file)}")
             df = pd.read_parquet(file)
             
-            if 'timestamp' in df.columns:
+            if 'timestamp' in df.columns and 'ingestion_ts' not in df.columns:
                 df['ingestion_ts'] = df['timestamp']
-            else:
+            elif 'ingestion_ts' not in df.columns:
                 df['ingestion_ts'] = datetime.now()
-            
-            records = df[
-                [
-                    "ingestion_ts",
-                    "alert_id",
-                    "affected_routes",
-                    "description_text",
-                    "cause"
-                ]
-            ].values.tolist()
-            
-            with conn.cursor() as cur:
-                cur.executemany(
-                    """
-                    INSERT INTO bart_service_alerts 
-                    VALUES (%s,%s,%s,%s,%s)
-                    """,
-                    records,
-                )
-            conn.commit()
-            
-            total_loaded += len(records)
-            print(f"Loaded {len(records)} service alerts")
-            
-        except Exception as e:
-            print(f"Error loading {file}: {e}")
-            conn.rollback()
-            continue
-    
-    print(f"Total service alerts loaded: {total_loaded}")
 
-def verify_data(conn):
-    with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM bart_trip_updates")
-        trip_count = cur.fetchone()[0]
-        
-        cur.execute("SELECT COUNT(*) FROM bart_service_alerts")
-        alert_count = cur.fetchone()[0]
-        
-        print(f"Database Summary:")
-        print(f"Trip updates: {trip_count:,} records")
-        print(f"Service alerts: {alert_count:,} records")
-        
-        if trip_count > 0:
-            cur.execute("""
-                SELECT route_id, COUNT(*) as count 
-                FROM bart_trip_updates 
-                WHERE route_id IS NOT NULL
-                GROUP BY route_id 
-                ORDER BY count DESC 
-                LIMIT 5
-            """)
-            print(f"Top routes by updates:")
-            for route, count in cur.fetchall():
-                print(f"Route {route}: {count:,} updates")
+            required_columns = [
+                "ingestion_ts", "alert_id", "cause", "effect",
+                "header_text", "description_text", "affected_routes",
+                "affected_stops", "active_period_start", "active_period_end"
+            ]
+
+            for col in required_columns:
+                if col not in df.columns:
+                    df[col] = None
+
+            records = df[required_columns].values.tolist()
+
+            batch_size = 1000
+            for i in range(0, len(records), batch_size):
+                batch = records[i:i+batch_size]
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO bart_service_alerts
+                        (ingestion_ts, alert_id, cause, effect, header_text,
+                         description_text, affected_routes, affected_stops,
+                         active_period_start, active_period_end)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        batch
+                    )
+                conn.commit()
+
+            total_loaded += len(records)
+            print(f"   ✓ Inserted: {len(records):,} records")
+
+        except Exception as e:
+            print(f"   ✗ Error: {e}")
+            conn.rollback()
+
+    print(f"✓ Total service alerts loaded: {total_loaded:,}")
 
 def main():
-    print("BART Data Loader")
-    
-    try:
-        conn = connect_db()
-        
-        create_tables(conn)
-        
-        load_trip_updates(conn)
-        load_service_alerts(conn)
-        
-        verify_data(conn)
-        
-        conn.close()
-        
-        print("Loading completed successfully!")
-        
-    except Exception as e:
-        print(f"Fatal error: {e}")
-        raise
+    print("="*60)
+    print("BART Data Loader - Fixed Version")
+    print("="*60)
+    conn = connect_db()
+    create_tables(conn)
+    load_trip_updates(conn)
+    load_service_alerts(conn)
+    conn.close()
+    print("="*60)
+    print("✅ Data loading complete!")
+    print("Dashboard: http://localhost:8501")
+    print("="*60)
 
 if __name__ == "__main__":
     main()

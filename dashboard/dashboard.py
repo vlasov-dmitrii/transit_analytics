@@ -28,6 +28,11 @@ def load_data(query):
     df = pd.read_sql(query, conn)
     return df
 
+def safe_float(value, default=0.0):
+    if value is None or pd.isna(value):
+        return default
+    return float(value)
+
 def main():
     st.title("BART Transit Analytics Dashboard")
     st.markdown("Real-time performance monitoring and delay analysis")
@@ -54,8 +59,8 @@ def main():
         COUNT(DISTINCT trip_id) as unique_trips,
         COUNT(DISTINCT route_id) as active_routes,
         COUNT(DISTINCT stop_id) as stops_tracked,
-        ROUND(AVG(arrival_delay/60)::numeric, 2) as avg_delay_minutes,
-        MAX(arrival_delay/60) as max_delay_minutes,
+        ROUND(COALESCE((AVG(arrival_delay) FILTER (WHERE arrival_delay IS NOT NULL))/60, 0)::numeric, 2) as avg_delay_minutes,
+        ROUND(COALESCE((MAX(arrival_delay) FILTER (WHERE arrival_delay IS NOT NULL))/60, 0)::numeric, 1) as max_delay_minutes,
         MIN(ingestion_ts) as earliest_data,
         MAX(ingestion_ts) as latest_data
     FROM bart_trip_updates
@@ -69,32 +74,40 @@ def main():
     with col1:
         st.metric(
             "Total Trip Updates",
-            f"{summary['total_records']:,}",
+            f"{int(summary['total_records']):,}",
             help="Total number of trip update records collected"
         )
     
     with col2:
         st.metric(
             "Unique Trips",
-            f"{summary['unique_trips']:,}",
+            f"{int(summary['unique_trips']):,}",
             help="Number of distinct trips tracked"
         )
     
     with col3:
+        avg_delay = safe_float(summary['avg_delay_minutes'])
         st.metric(
             "Average Delay",
-            f"{summary['avg_delay_minutes']:.2f} min",
+            f"{avg_delay:.2f} min",
             help="System-wide average delay in minutes"
         )
     
     with col4:
+        max_delay = safe_float(summary['max_delay_minutes'])
         st.metric(
             "Max Delay",
-            f"{summary['max_delay_minutes']:.1f} min",
+            f"{max_delay:.1f} min",
             help="Worst delay observed in the period"
         )
     
-    st.info(f"Data from {summary['earliest_data'].strftime('%Y-%m-%d %H:%M')} to {summary['latest_data'].strftime('%Y-%m-%d %H:%M')} | {summary['active_routes']} routes | {summary['stops_tracked']} stops")
+    if summary['earliest_data'] is not None and summary['latest_data'] is not None:
+        earliest = summary['earliest_data'].strftime('%Y-%m-%d %H:%M')
+        latest = summary['latest_data'].strftime('%Y-%m-%d %H:%M')
+        st.info(f"Data from {earliest} to {latest} | {summary['active_routes']} routes | {summary['stops_tracked']} stops")
+    else:
+        st.warning("No data found in the selected date range. Try increasing the number of days.")
+        return
     
     col_left, col_right = st.columns(2)
     
@@ -105,12 +118,11 @@ def main():
         SELECT 
             route_id,
             COUNT(*) as total_trips,
-            COUNT(CASE WHEN arrival_delay <= 60 THEN 1 END) as on_time,
-            ROUND(100.0 * COUNT(CASE WHEN arrival_delay <= 60 THEN 1 END) / COUNT(*), 1) as on_time_pct,
-            ROUND(AVG(arrival_delay/60)::numeric, 2) as avg_delay_minutes
+            COUNT(CASE WHEN COALESCE(arrival_delay, 0) <= 60 THEN 1 END) as on_time,
+            ROUND((100.0 * COUNT(CASE WHEN COALESCE(arrival_delay, 0) <= 60 THEN 1 END) / COUNT(*))::numeric, 1) as on_time_pct,
+            ROUND(COALESCE((AVG(arrival_delay) FILTER (WHERE arrival_delay IS NOT NULL))/60, 0)::numeric, 2) as avg_delay_minutes
         FROM bart_trip_updates
         WHERE route_id IS NOT NULL 
-          AND arrival_delay IS NOT NULL
           AND ingestion_ts >= NOW() - INTERVAL '{days_back} days'
         GROUP BY route_id
         HAVING COUNT(*) >= 10
@@ -163,7 +175,7 @@ def main():
     SELECT 
         EXTRACT(HOUR FROM arrival_time) as hour,
         COUNT(*) as trip_count,
-        ROUND(AVG(arrival_delay/60)::numeric, 2) as avg_delay
+        ROUND(COALESCE((AVG(arrival_delay) FILTER (WHERE arrival_delay IS NOT NULL))/60, 0)::numeric, 2) as avg_delay
     FROM bart_trip_updates
     WHERE arrival_time IS NOT NULL
       AND ingestion_ts >= NOW() - INTERVAL '{days_back} days'
@@ -206,7 +218,7 @@ def main():
     delay_dist_query = f"""
     SELECT 
         CASE 
-            WHEN arrival_delay <= 0 THEN 'Early/On-Time'
+            WHEN COALESCE(arrival_delay, 0) <= 0 THEN 'Early/On-Time'
             WHEN arrival_delay > 0 AND arrival_delay <= 60 THEN '0-1 min'
             WHEN arrival_delay > 60 AND arrival_delay <= 180 THEN '1-3 min'
             WHEN arrival_delay > 180 AND arrival_delay <= 300 THEN '3-5 min'
@@ -215,8 +227,7 @@ def main():
         END as delay_category,
         COUNT(*) as count
     FROM bart_trip_updates
-    WHERE arrival_delay IS NOT NULL
-      AND ingestion_ts >= NOW() - INTERVAL '{days_back} days'
+    WHERE ingestion_ts >= NOW() - INTERVAL '{days_back} days'
     GROUP BY delay_category
     """
     
@@ -224,12 +235,12 @@ def main():
     
     if not delay_dist.empty:
         category_order = ['Early/On-Time', '0-1 min', '1-3 min', '3-5 min', '5-10 min', '10+ min']
-        delay_dist['delay_category'] = pd.Categorical(
-            delay_dist['delay_category'],
-            categories=category_order,
-            ordered=True
-        )
-        delay_dist = delay_dist.sort_values('delay_category')
+        
+        all_categories = pd.DataFrame({'delay_category': category_order})
+        delay_dist = all_categories.merge(delay_dist, on='delay_category', how='left')
+        delay_dist['count'] = delay_dist['count'].fillna(0).astype(int)
+        
+        delay_dist = delay_dist[delay_dist['count'] > 0]
         
         col1, col2 = st.columns(2)
         
@@ -239,7 +250,7 @@ def main():
                 values='count',
                 names='delay_category',
                 title='Distribution of Delays',
-                color_discrete_sequence=px.colors.sequential.RdBu_r
+                category_orders={'delay_category': category_order}
             )
             fig.update_layout(height=350)
             st.plotly_chart(fig, use_container_width=True)
@@ -251,8 +262,7 @@ def main():
                 y='count',
                 title='Delay Frequency',
                 labels={'delay_category': 'Delay Category', 'count': 'Count'},
-                color='delay_category',
-                color_discrete_sequence=px.colors.sequential.RdBu_r
+                category_orders={'delay_category': category_order}
             )
             fig.update_layout(showlegend=False, height=350)
             st.plotly_chart(fig, use_container_width=True)
@@ -275,13 +285,12 @@ def main():
             SELECT 
                 stop_id,
                 COUNT(*) as visits,
-                ROUND(AVG(arrival_delay/60)::numeric, 2) as avg_delay,
-                MAX(arrival_delay/60) as max_delay,
-                COUNT(CASE WHEN arrival_delay > 60 THEN 1 END) as delayed_arrivals
+                ROUND(COALESCE((AVG(arrival_delay) FILTER (WHERE arrival_delay IS NOT NULL))/60, 0)::numeric, 2) as avg_delay,
+                ROUND(COALESCE((MAX(arrival_delay) FILTER (WHERE arrival_delay IS NOT NULL))/60, 0)::numeric, 1) as max_delay,
+                COUNT(CASE WHEN COALESCE(arrival_delay, 0) > 60 THEN 1 END) as delayed_arrivals
             FROM bart_trip_updates
             WHERE route_id = '{selected_route}'
               AND stop_id IS NOT NULL
-              AND arrival_delay IS NOT NULL
               AND ingestion_ts >= NOW() - INTERVAL '{days_back} days'
             GROUP BY stop_id
             HAVING COUNT(*) >= 5

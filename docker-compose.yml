@@ -24,6 +24,11 @@ services:
         condition: service_healthy
     environment:
       RAW_DIR: /app/data/raw
+      DB_HOST: bart_postgres
+      DB_PORT: 5432
+      DB_NAME: bart_dw
+      DB_USER: bart
+      DB_PASSWORD: bart
     volumes:
       - ./data:/app/data
       - ./data_engineering:/app/data_engineering
